@@ -1,56 +1,108 @@
+from typing import List
+
 import streamlit as st
-from openai import OpenAI
+from anthropic import Anthropic
 
-# Show title and description.
-st.title("💬 Chatbot")
-st.write(
-    "This is a simple chatbot that uses OpenAI's GPT-3.5 model to generate responses. "
-    "To use this app, you need to provide an OpenAI API key, which you can get [here](https://platform.openai.com/account/api-keys). "
-    "You can also learn how to build this app step by step by [following our tutorial](https://docs.streamlit.io/develop/tutorials/llms/build-conversational-apps)."
-)
+import hive_ai_wrapper
+from helpers import bottom
+from chats import ChatHistoryInstance, render_chat_history, add_chat_instance
 
-# Ask user for their OpenAI API key via `st.text_input`.
-# Alternatively, you can store the API key in `./.streamlit/secrets.toml` and access it
-# via `st.secrets`, see https://docs.streamlit.io/develop/concepts/connections/secrets-management
-openai_api_key = st.text_input("OpenAI API Key", type="password")
-if not openai_api_key:
-    st.info("Please add your OpenAI API key to continue.", icon="🗝️")
-else:
+message_context_length = 10
 
-    # Create an OpenAI client.
-    client = OpenAI(api_key=openai_api_key)
+# Define session state variables to store history
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history: List[ChatHistoryInstance] = []  # To store chat prompts and responses
 
-    # Create a session state variable to store the chat messages. This ensures that the
-    # messages persist across reruns.
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
 
-    # Display the existing chat messages via `st.chat_message`.
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+# ----------------------------- Page Content -------------------------------------
+image_gen = "🖼️ Image Generation"
+text_gen = "💬 Text Generation"
 
-    # Create a chat input field to allow the user to enter a message. This will display
-    # automatically at the bottom of the page.
-    if prompt := st.chat_input("What is up?"):
 
-        # Store and display the current prompt.
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+st.title(":rainbow[Generative AI Demo - Image/Text]")
+st.link_button("By TheFrogThatIs", "https://github.com/TheFrogThatIs", icon="🐸")
 
-        # Generate a response using the OpenAI API.
-        stream = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": m["role"], "content": m["content"]}
-                for m in st.session_state.messages
-            ],
-            stream=True,
-        )
 
-        # Stream the response to the chat using `st.write_stream`, then store it in 
-        # session state.
-        with st.chat_message("assistant"):
-            response = st.write_stream(stream)
-        st.session_state.messages.append({"role": "assistant", "content": response})
+with st.container(border=True):
+    anthropic_api_key = st.text_input(
+        "[Anthropic API Key](https://console.anthropic.com/)",
+        type="password",
+        help="Anthropic Key is Required for Text Generation"
+    )
+    hiveai_api_key = st.text_input(
+        "[Hive.ai API Key](https://docs.thehive.ai/docs/getting-started)",
+        type="password",
+        help="Hive.ai Key is Required for Image Generation."
+    )
+
+# Create an OpenAI client.
+anthropic_client = Anthropic(api_key=anthropic_api_key)
+
+
+with bottom():
+    selected_method = st.selectbox(
+        "Choose the method for generating the response:",
+        [image_gen, text_gen],
+    )
+
+    chat_disabled = (selected_method == image_gen and not hiveai_api_key) or (selected_method == text_gen and not anthropic_api_key)
+    prompt = st.chat_input(
+        f"{selected_method}: What do you want to create today?" if selected_method == image_gen
+        else f"{selected_method}: Let's chat! Send me a message",
+        disabled=chat_disabled,
+    )
+    if selected_method == image_gen and not hiveai_api_key:
+        st.error('Hive.ai Key is Required for Image Generation.', icon="ℹ️")
+    if selected_method == text_gen and not anthropic_api_key:
+        st.error('Anthropic Key is Required for Text Generation', icon="ℹ️")
+
+
+# Chat Container
+with st.container(border=True):
+    if prompt:
+        # Add user prompt to chat history
+        add_chat_instance(type_of="Text", author="User", message=prompt)
+
+        # ----------------------------- Image Generation -------------------------------------
+        if selected_method == image_gen:
+            # Call the image generation API
+            image_response = {}
+            try:
+                image_response = hive_ai_wrapper.generate_image_response(prompt, hiveai_key=hiveai_api_key, images_count=1)
+                image_url = image_response["status"][0]["response"]["output"][0]["images"][0]["url"]  # Not ideal, but fine for this
+
+                # Add generated image to chat history
+                add_chat_instance(type_of="Image", author="AI", message=prompt, image_url=image_url)
+            except Exception as e:
+                if "message" in image_response:
+                    add_chat_instance(type_of="Error", author="AI", message=image_response["message"])
+                else:
+                    add_chat_instance(type_of="Error", author="AI", message="This Request to AI has Failed. Please Check API Key/s.")
+
+        # ----------------------------- Text Generation -------------------------------------
+        elif selected_method == text_gen:
+            # Generate a response using the Anthropic API.
+            # https://docs.anthropic.com/en/api/client-sdks#python
+            message_history = [{
+                "role": "user" if m.author == "User" else "assistant",
+                "content": m.message if m.type_of == "Text" else f"AI Generated an Image of: {m.message}",
+            } for m in st.session_state.chat_history[-message_context_length:]]
+
+            try:
+                chat_completion = anthropic_client.messages.create(
+                    model="claude-3-haiku-20240307",
+                    max_tokens=1024,
+                    messages=message_history,
+                )
+                response = chat_completion.content[0].text
+
+                # Add generated image to chat history
+                add_chat_instance(type_of="Text", author="AI", message=response)
+            except Exception as e:
+                add_chat_instance(type_of="Error", author="AI", message="This Request to AI has Failed. Please Check API Key/s.")
+
+    # Render the chat history (if exists)
+    if len(st.session_state.chat_history) > 0:
+        st.write("## Chat History:")
+
+    render_chat_history()
